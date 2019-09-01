@@ -1,4 +1,4 @@
-// Package coinjoin defines a builder type for creating Decred CoinJoin transactions.
+// Package coinjoin defines a builder type for creating Bitcoin CoinJoin transactions.
 package coinjoin
 
 import (
@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/decred/dcrd/wire"
+	"github.com/btcsuite/btcd/wire"
 )
 
 var shuffleRand *mathrand.Rand
@@ -50,7 +50,7 @@ type Tx struct {
 	sc            ScriptClass
 	inputPids     []int
 	mixValue      int64
-	txVersion     uint16
+	txVersion     int32
 	scriptVersion uint16
 	lockTime      uint32
 	expiry        uint32
@@ -65,12 +65,7 @@ const (
 	numScriptClasses
 )
 
-func (sc ScriptClass) Match(script []byte, vers uint16) bool {
-	// Only recognize v0 scripts currently
-	if vers != 0 {
-		return false
-	}
-
+func (sc ScriptClass) Match(script []byte) bool {
 	var match bool
 	switch sc {
 	case P2PKHv0:
@@ -166,11 +161,11 @@ func NewTx(caller Caller, sc ScriptClass, amount int64, txVersion uint16, lockTi
 		return nil, errors.New("unknown script class")
 	}
 	tx := &Tx{
-		Tx:        wire.MsgTx{Version: txVersion},
+		Tx:        wire.MsgTx{Version: int32(txVersion)},
 		c:         caller,
 		sc:        sc,
 		mixValue:  amount,
-		txVersion: txVersion,
+		txVersion: int32(txVersion),
 		lockTime:  lockTime,
 		expiry:    expiry,
 	}
@@ -203,12 +198,12 @@ func (t *Tx) ValidateUnmixed(unmixed []byte) error {
 		return errors.New("coinjoin: different tx versions")
 	}
 	for _, out := range other.TxOut {
-		if !t.sc.Match(out.PkScript, out.Version) {
+		if !t.sc.Match(out.PkScript) {
 			return errors.New("coinjoin: different script class")
 		}
 	}
 	for _, in := range other.TxIn {
-		if err := verifyOutput(t.c, &in.PreviousOutPoint, in.ValueIn); err != nil {
+		if _, err := verifyOutput(t.c, &in.PreviousOutPoint); err != nil {
 			if e, ok := err.(*blameError); ok {
 				return errors.New(e.s)
 			}
@@ -230,12 +225,12 @@ func (t *Tx) Join(unmixed []byte, pid int) error {
 		return errors.New("coinjoin: different tx versions")
 	}
 	for _, out := range other.TxOut {
-		if !t.sc.Match(out.PkScript, out.Version) {
+		if !t.sc.Match(out.PkScript) {
 			return errors.New("coinjoin: different script class")
 		}
 	}
 	for _, in := range other.TxIn {
-		if err := verifyOutput(t.c, &in.PreviousOutPoint, in.ValueIn); err != nil {
+		if _, err := verifyOutput(t.c, &in.PreviousOutPoint); err != nil {
 			if e, ok := err.(*blameError); ok {
 				e.b = []int{pid}
 			}
@@ -251,23 +246,23 @@ func (t *Tx) Join(unmixed []byte, pid int) error {
 	return nil
 }
 
-func verifyOutput(c Caller, outpoint *wire.OutPoint, value int64) error {
+func verifyOutput(c Caller, outpoint *wire.OutPoint) (value int64, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	var res struct {
 		Value float64 `json:"value"`
 	}
-	err := c.Call(ctx, "gettxout", &res, outpoint.Hash.String(), outpoint.Index)
+	err = c.Call(ctx, "gettxout", &res, outpoint.Hash.String(), outpoint.Index)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if v := atoms(res.Value); v != value {
-		return &blameError{
+		return 0, &blameError{
 			fmt.Sprintf("output %v has wrong value %d (expected %d)", outpoint, value, v),
 			nil,
 		}
 	}
-	return nil
+	return atoms(res.Value), nil
 }
 
 func atoms(f float64) int64 {
@@ -279,7 +274,6 @@ func atoms(f float64) int64 {
 func (t *Tx) Mix(m []byte) {
 	t.Tx.TxOut = append(t.Tx.TxOut, &wire.TxOut{
 		Value:    t.mixValue,
-		Version:  t.sc.version(),
 		PkScript: t.sc.script(m),
 	})
 }

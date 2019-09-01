@@ -3,6 +3,7 @@ module decred.org/cspp
 go 1.12
 
 require (
+	github.com/btcsuite/btcd v0.0.0-20190824003749-130ea5bddde3
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/decred/dcrd/chaincfg/chainhash v1.0.2 // indirect
 	github.com/decred/dcrd/crypto/blake256 v1.0.0
