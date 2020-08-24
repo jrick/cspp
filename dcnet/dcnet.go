@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"math/big"
 	"strings"
 
 	"decred.org/cspp/chacha20prng"
 	"decred.org/cspp/x25519"
+	"github.com/companyzero/sntrup4591761"
 	"github.com/decred/dcrd/crypto/blake256"
 )
 
@@ -163,25 +165,73 @@ func (v *Vec) String() string {
 	return b.String()
 }
 
+type PQKX struct {
+	Secrets     []*[sntrup4591761.PrivateKeySize]byte
+	Publics     []*[sntrup4591761.PublicKeySize]byte
+	SharedKeys  [][]*[32]byte
+	Ciphertexts [][]*Ciphertext
+}
+
+type Ciphertext = [sntrup4591761.CiphertextSize]byte
+
+func (kx *PQKX) PQKeyExchange(prng io.Reader, kx *PQKX, start, mcount int) error {
+	mtot := len(kx.PQPublics)
+	for i := 0; i < mcount; i++ {
+		my := start + i
+		for from := 0; from < mtot; from++ {
+			if from == my {
+				continue
+			}
+			sharedKey, ct := sntrup4591761.Encapsulate(prng, kx.Publics[i])
+
+		}
+	}
+}
+
+// KX contains all public and secret values to generate a shared key for all
+// other peers.
+type KX struct {
+	ECDHSecrets  []*x25519.KX
+	ECDHPublics  []*x25519.Public
+	PQSharedKeys []*[32]byte
+}
+
 // SharedKeys creates the SR and DC shared secret keys for mcount mixes, where
 // indexes [start, start+mcount) are a peer's pre-assigned non-anonymous
 // positions.
-func SharedKeys(secrets []*x25519.KX, publics []*x25519.Public, sid []byte, msize, run, start, mcount int) (sr [][][]byte, dc [][]*Vec) {
+func SharedKeys(kx *KX, sid []byte, msize, run, start, mcount int) (sr [][][]byte, dc [][]*Vec) {
 	sr = make([][][]byte, mcount)
 	dc = make([][]*Vec, mcount)
-	mtot := len(publics)
+	mtot := len(kx.ECDHPublics)
 	for i := 0; i < mcount; i++ {
 		my := start + i
 		sr[i] = make([][]byte, mtot)
 		dc[i] = make([]*Vec, mtot)
-		for from, pub := range publics {
+		for from := 0; from < mtot; from++ {
 			if from == my {
 				continue
 			}
 
+			x25519Pub := kx.ECDHPublics[i]
+			sharedKey := kx.ECDHSecrets[i].SharedKey(x25519Pub)
+
+			pqct := kx.PQCiphertexts[i]
+			pqKey, ok := sntrup4591761.Decapsulate(pqct, kx.PQSecrets[i])
+			if ok != 1 {
+				// XXX
+				panic("decap failed")
+			}
+
+			// XOR x25519 and sntrup keys into a single shared key;
+			// thus if snprup is broken in the future, the security
+			// reduces to that of x25519.
+			for i := 0; i < 32; i++ {
+				sharedKey[i] ^= kx.PQSharedKeys[i]
+			}
+
 			h := blake256.New()
 			h.Write(sid)
-			h.Write(secrets[i].SharedKey(pub))
+			h.Write(sharedKey)
 			prngSeed := h.Sum(nil)
 			prng := chacha20prng.New(prngSeed, uint32(run))
 

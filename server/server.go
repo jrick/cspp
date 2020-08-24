@@ -92,6 +92,7 @@ type Server struct {
 
 type runState struct {
 	keCount   uint32
+	ctCount   uint32
 	srCount   uint32
 	dcCount   uint32
 	confCount uint32
@@ -106,6 +107,7 @@ type runState struct {
 	roots    []*big.Int
 
 	allKEs   chan struct{}
+	allCTs   chan struct{}
 	allSRs   chan struct{}
 	allDCs   chan struct{}
 	allConfs chan struct{}
@@ -139,6 +141,7 @@ type client struct {
 	sesc   chan *session
 	pr     *messages.PR
 	ke     *messages.KE
+	ct     *messages.CT
 	sr     *messages.SR
 	dc     *messages.DC
 	cm     *messages.CM
@@ -424,6 +427,7 @@ func (s *Server) pairSessions(ctx context.Context) error {
 			ses := &session{
 				runState: runState{
 					allKEs:    make(chan struct{}),
+					allCTs:    make(chan struct{}),
 					allSRs:    make(chan struct{}),
 					allDCs:    make(chan struct{}),
 					allConfs:  make(chan struct{}),
@@ -595,6 +599,9 @@ func (s *session) exclude(blamed []int) error {
 		select {
 		case c.out <- s.br:
 		case <-c.done:
+		case <-time.After(10 * time.Second):
+			log.Printf("%#v\n", c)
+			select {}
 		}
 	}
 	return nil
@@ -691,6 +698,40 @@ func (s *session) doRun(ctx context.Context) (err error) {
 	for _, c := range s.clients {
 		select {
 		case c.out <- kes:
+		case <-c.done:
+		}
+	}
+	s.mu.Unlock()
+
+	// Wait for all CT messages, or CT timeout.
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.allKEs:
+		log.Print("received all KE messages")
+	case <-time.After(recvTimeout):
+		log.Print("KE timeout")
+	}
+
+	// Broadcast received KEs to each unexcluded peer.
+	s.mu.Lock()
+	cts := &messages.CTs{
+		CTs: make([]*messages.CT, 0, len(s.clients)),
+	}
+	for i, c := range s.clients {
+		if c.ct == nil {
+			timedOut = append(timedOut, i)
+			continue
+		}
+		cts.CTs = append(cts.CTs, c.ct)
+	}
+	if len(timedOut) != 0 {
+		s.mu.Unlock()
+		return timedOut
+	}
+	for _, c := range s.clients {
+		select {
+		case c.out <- cts:
 		case <-c.done:
 		}
 	}
@@ -930,8 +971,43 @@ func (c *client) run(ctx context.Context, run int, s *session, ke *messages.KE) 
 		}
 	}
 
+	ct := new(messages.CT)
+	err := c.readDeadline(ct, recvTimeout)
+	if err != nil {
+		return fmt.Errorf("read CT: %v", err)
+	}
+
+	s.mu.Lock()
+	c.ct = ct
+	s.ctCount++
+	if s.ctCount == uint32(len(s.clients)) {
+		close(s.allCTs)
+	}
+	s.mu.Unlock()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-blaming:
+		err := c.sendDeadline(revealSecrets, sendTimeout)
+		if err != nil {
+			return err
+		}
+		return c.blame(ctx, s)
+	case cts := <-c.out:
+		err := c.sendDeadline(cts, sendTimeout)
+		if err != nil {
+			return err
+		}
+		select {
+		case <-rerunning:
+			return errRerun
+		default:
+		}
+	}
+
 	sr := new(messages.SR)
-	err := c.readDeadline(sr, recvTimeout)
+	err = c.readDeadline(sr, recvTimeout)
 	if err != nil {
 		return fmt.Errorf("read SR: %v", err)
 	}
@@ -1239,7 +1315,13 @@ KELoop:
 SRLoop:
 	for i, c := range s.clients {
 		// Recover shared secrets
-		b[i].srKP, b[i].dcKP = dcnet.SharedKeys(b[i].kx, ecdh, s.sid, s.msize,
+		kx := &dcnet.KX{
+			ECDHSecrets:   b[i].kx,
+			ECDHPublics:   ecdh,
+			PQSecrets:     nil, // XXX pqSecrets,
+			PQCiphertexts: nil, // XXX pqCiphertexts,
+		}
+		b[i].srKP, b[i].dcKP = dcnet.SharedKeys(kx, s.sid, s.msize,
 			s.run, starts[i], c.pr.MessageCount)
 
 		for j, m := range b[i].srMsg {

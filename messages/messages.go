@@ -2,18 +2,20 @@
 // server.  The messaging in a successful run is sequenced as follows:
 //
 //   Client | Server
-//      PR -->      Pair Request
-//                  (wait for epoch)
-//         <-- BR   Begin Run
-//      KE -->      Key Exchange
-//         <-- KEs  Server broadcasts all KE messages to all peers
-//      SR -->      Slot Reserve
-//         <-- RM   Recovered Messages
-//      DC -->      DC-net broadcast
-//         <-- CM   Confirm Messages (unsigned)
-//      CM -->      Confirm Messages (signed)
-//                  (server joins all signatures)
-//         <-- CM   Confirm Messages (with all signatures)
+//      PR -->       Pair Request
+//                   (wait for epoch)
+//         <-- BR    Begin Run
+//      KE -->       Key Exchange
+//         <-- KEs   Server broadcasts all KE messages to all peers
+//      CT -->       Post-Quantum ciphertext exchange
+//         <-- CTs   Server broadcasts all CT messages to all peers
+//      SR -->       Slot Reserve
+//         <-- RM    Recovered Messages
+//      DC -->       DC-net broadcast
+//         <-- CM    Confirm Messages (unsigned)
+//      CM -->       Confirm Messages (signed)
+//                   (server joins all signatures)
+//         <-- CM    Confirm Messages (with all signatures)
 //
 // If a peer fails to find their message after either the exponential slot
 // reservation or XOR DC-net, the DC or CM message indicates to the server that
@@ -50,6 +52,7 @@ import (
 
 	"decred.org/cspp/dcnet"
 	"decred.org/cspp/x25519"
+	"github.com/companyzero/sntrup4591761"
 	"github.com/decred/dcrd/crypto/blake256"
 	"golang.org/x/crypto/ed25519"
 )
@@ -220,19 +223,25 @@ func (br *BR) ServerError() error {
 	return br.Err
 }
 
+type Sntrup4591761PublicKey = [sntrup4591761.PublicKeySize]byte
+type Sntrup4591761Ciphertext = [sntrup4591761.CiphertextSize]byte
+
 // KE is the client's opening key exchange message of a run.
 type KE struct {
 	Run        int              // 0, 1, ...
 	ECDH       []*x25519.Public // Public portions of x25519 key exchanges, one for each mixed message
-	Commitment []byte           // Hash of RS (reveal secrets) message contents
+	PQPK       []*Sntrup4591761PublicKey
+	Commitment []byte // Hash of RS (reveal secrets) message contents
 }
 
 // KeyExchange creates a signed key exchange message to verifiably provide the
-// x25519 public portion.
-func KeyExchange(ecdh []*x25519.Public, commitment []byte, ses *Session) *KE {
+// x25519 and sntrup4591761 public keys.
+func KeyExchange(ecdh []*x25519.Public, pqpk []*Sntrup4591761PublicKey,
+	commitment []byte, ses *Session) *KE {
 	return &KE{
 		Run:        ses.run,
 		ECDH:       ecdh,
+		PQPK:       pqpk,
 		Commitment: commitment,
 	}
 }
@@ -249,6 +258,26 @@ func (kes *KEs) ServerError() error {
 		return nil
 	}
 	return kes.Err
+}
+
+// CT is the client's exchange of post-quantum shared key ciphertexts with all
+// other peers in the run.
+type CT struct {
+	CT []*Sntrup4591761Ciphertext
+}
+
+// CTs is the server's broadcast of all received shared key ciphertexts.
+type CTs struct {
+	CTs []*CT
+	BR  // Indicates to begin a new run after peer exclusion
+	Err ServerError
+}
+
+func (cts *CTs) ServerError() error {
+	if cts.Err == 0 {
+		return nil
+	}
+	return cts.Err
 }
 
 // SR is the slot reservation broadcast.
@@ -329,17 +358,20 @@ func ConfirmMix(mix BinaryRepresentable) *CM {
 	return &CM{Mix: mix}
 }
 
-// RS is the reveal secrets message.  It reveals x25519, SR and DC secrets at
-// the end of a failed run for blame assignment and misbehaving peer removal.
+// RS is the reveal secrets message.  It reveals a run's PRNG seed, x25519, SR
+// and DC secrets at the end of a failed run for blame assignment and
+// misbehaving peer removal.
 type RS struct {
+	Seed []byte
 	ECDH []*x25519.Scalar
 	SR   []*big.Int
 	M    [][]byte
 }
 
 // RevealSecrets creates the reveal secrets message.
-func RevealSecrets(ecdh []*x25519.KX, sr []*big.Int, m [][]byte) *RS {
+func RevealSecrets(prngSeed []byte, ecdh []*x25519.KX, sr []*big.Int, m [][]byte) *RS {
 	rs := &RS{
+		Seed: prngSeed,
 		ECDH: make([]*x25519.Scalar, len(ecdh)),
 		SR:   sr,
 		M:    m,
@@ -360,6 +392,7 @@ func (rs *RS) Commit(ses *Session) []byte {
 	h.Write(ses.sid)
 	binary.LittleEndian.PutUint32(scratch, uint32(ses.run))
 	h.Write(scratch)
+	h.Write(rs.Seed)
 	for i := range rs.ECDH {
 		h.Write(rs.ECDH[i][:])
 	}

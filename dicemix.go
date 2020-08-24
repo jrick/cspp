@@ -20,9 +20,11 @@ import (
 	"sort"
 	"time"
 
+	"decred.org/cspp/chacha20prng"
 	"decred.org/cspp/dcnet"
 	"decred.org/cspp/messages"
 	"decred.org/cspp/x25519"
+	"github.com/companyzero/sntrup4591761"
 	"golang.org/x/crypto/ed25519"
 )
 
@@ -74,8 +76,9 @@ type Session struct {
 	genConf  GenConfirmer
 	freshGen bool         // Whether next run must generate fresh x25519 keys, SR/DC messages
 	kx       []*x25519.KX // key exchange
-	srMsg    []*big.Int   // random numbers to be exponential slot reservation mix
-	dcMsg    [][]byte     // anonymized messages to publish
+	pqkx     []pqkeypair
+	srMsg    []*big.Int // random numbers to be exponential slot reservation mix
+	dcMsg    [][]byte   // anonymized messages to publish
 
 	client *client
 	sid    []byte
@@ -89,6 +92,11 @@ type Session struct {
 	myVk    int
 	myStart int
 	myEnd   int
+}
+
+type pqkeypair struct {
+	Public *[sntrup4591761.PublicKeySize]byte
+	Secret *[sntrup4591761.PrivateKeySize]byte
 }
 
 type client struct {
@@ -153,6 +161,9 @@ func (c *client) recv(out interface{}, timeout time.Duration) error {
 type run struct {
 	session *Session
 	run     int
+
+	prngSeed []byte
+	prng     *chacha20prng.Reader
 
 	// Exponential slot reservation mix
 	srKP  [][][]byte // shared keys for exp dc-net
@@ -280,6 +291,12 @@ func (s *Session) run(ctx context.Context, n int, br *messages.BR) error {
 	ses := messages.NewSession(s.sid, n, s.vk)
 
 	r := &run{session: s, run: n}
+	r.prngSeed = make([]byte, 32)
+	_, err := io.ReadFull(s.rand, r.prngSeed)
+	if err != nil {
+		return err
+	}
+	r.prng = chacha20prng.New(r.prngSeed, uint32(r.run))
 	if n == 0 || s.freshGen {
 		s.freshGen = false
 
@@ -291,6 +308,16 @@ func (s *Session) run(ctx context.Context, n int, br *messages.BR) error {
 			if err != nil {
 				return err
 			}
+		}
+
+		// Generate fresh sntrup 4591^761 keys from this run's PRNG
+		s.pqkx = make([]pqkeypair, s.mcount)
+		for i := range s.pqkx {
+			pk, sk, err := sntrup4591761.GenerateKey(r.prng)
+			if err != nil {
+				return err
+			}
+			s.pqkx[i].Public, s.pqkx[i].Secret = pk, sk
 		}
 
 		// Generate fresh SR messages
@@ -323,9 +350,13 @@ func (s *Session) run(ctx context.Context, n int, br *messages.BR) error {
 	for i := range pubs {
 		pubs[i] = &s.kx[i].Public
 	}
-	rs := messages.RevealSecrets(s.kx, s.srMsg, s.dcMsg)
-	ke := messages.KeyExchange(pubs, rs.Commit(ses), ses)
-	err := s.client.send(ke, sendTimeout)
+	pqpubs := make([]*messages.Sntrup4591761PublicKey, len(s.kx))
+	for i := range pqpubs {
+		pqpubs[i] = s.pqkx[i].Public
+	}
+	rs := messages.RevealSecrets(r.prngSeed, s.kx, s.srMsg, s.dcMsg)
+	ke := messages.KeyExchange(pubs, pqpubs, rs.Commit(ses), ses)
+	err = s.client.send(ke, sendTimeout)
 	if err != nil {
 		return err
 	}
@@ -340,18 +371,37 @@ func (s *Session) run(ctx context.Context, n int, br *messages.BR) error {
 	}
 	s.log.Printf("received KEs")
 	ecdh := make([]*x25519.Public, 0, s.mtot)
+	pqpk := make([]*[sntrup4591761.PublicKeySize]byte, 0, s.mtot)
 	for _, ke := range kes.KEs {
 		if ke == nil {
 			continue
 		}
 		ecdh = append(ecdh, ke.ECDH...)
+		pqCiphertexts = append(pqpk, ke.PQPK...)
 	}
 	if len(ecdh) != s.mtot {
 		return errors.New("wrong total ECDH public count")
 	}
+	if len(pqpk) != s.mtot {
+		return errors.New("wrong total PQ public key count")
+	}
+
+	// Create shared key and ciphertexts for each peer
 
 	// Derive shared secret keys
-	r.srKP, r.dcKP = dcnet.SharedKeys(s.kx, ecdh, s.sid, MessageSize, r.run, s.myStart, s.mcount)
+	pqSecrets := make([]*[sntrup4591761.PrivateKeySize]byte, 0, len(s.pqkx))
+	pqCiphertexts := make([]*[sntrup4591761.CiphertextSize]byte, 0, len(s.pqkx))
+	for i := range s.pqkx {
+		pqSecrets = append(pqSecrets, s.pqkx[i].Secret)
+		// XXX ciphertexts
+	}
+	kx := &dcnet.KX{
+		ECDHSecrets:   s.kx,
+		ECDHPublics:   ecdh,
+		PQSecrets:     pqSecrets,
+		PQCiphertexts: pqCiphertexts,
+	}
+	r.srKP, r.dcKP = dcnet.SharedKeys(kx, s.sid, MessageSize, r.run, s.myStart, s.mcount)
 
 	// Calculate slot reservation DC-net vectors
 	r.srMix = make([][]*big.Int, s.mcount)
