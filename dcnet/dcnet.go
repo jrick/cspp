@@ -165,26 +165,90 @@ func (v *Vec) String() string {
 	return b.String()
 }
 
+// Aliases for sntrup4591761 types
+type (
+	PQSecretKey  = [sntrup4591761.PrivateKeySize]byte
+	PQPublicKey  = [sntrup4591761.PublicKeySize]byte
+	PQCiphertext = [sntrup4591761.CiphertextSize]byte
+)
+
+// PQKX facilitates post-quantum key exchange between all DC-net peers using
+// Streamlined NTRU Prime 4591^761 encapsulation.  This key exchange requires an
+// additional communication round-trip to broadcast ciphertexts of shared keys
+// after public keys are exchanged.
 type PQKX struct {
-	Secrets     []*[sntrup4591761.PrivateKeySize]byte
-	Publics     []*[sntrup4591761.PublicKeySize]byte
-	SharedKeys  [][]*[32]byte
-	Ciphertexts [][]*Ciphertext
+	Secrets    []*PQSecretKey // len=mcount
+	Publics    []*PQPublicKey // len=mtot
+	SharedKeys [][][32]byte   // dimensions: mcount x mtot
 }
 
-type Ciphertext = [sntrup4591761.CiphertextSize]byte
-
-func (kx *PQKX) PQKeyExchange(prng io.Reader, kx *PQKX, start, mcount int) error {
-	mtot := len(kx.PQPublics)
+// Encapsulate populates the SharedKeys field of kx, and returns encrypted
+// cyphertexts of the shared keys, by performing sntrup4591761 encapsulation
+// between every keypair from message indexes [start, start+mcount).  mcount is
+// calculated as the length of kx.Secrets.
+//
+// Encapsulation in the DC-net requires randomness from a CSPRNG seeded by a
+// committed secret; blame assignment is not possible otherwise.
+func (kx *PQKX) Encapsulate(prng io.Reader, start int) ([][]*PQCiphertext, error) {
+	mcount := len(kx.Secrets)
+	mtot := len(kx.Publics)
+	kx.SharedKeys = make([][][32]byte, mcount)
+	ciphertexts := make([][]*PQCiphertext, mcount)
 	for i := 0; i < mcount; i++ {
 		my := start + i
-		for from := 0; from < mtot; from++ {
-			if from == my {
+
+		kx.SharedKeys[i] = make([][32]byte, mtot)
+		ciphertexts[i] = make([]*PQCiphertext, mtot)
+
+		for j := 0; j < mtot; j++ {
+			if my == j {
 				continue
 			}
-			sharedKey, ct := sntrup4591761.Encapsulate(prng, kx.Publics[i])
 
+			ct, sharedKey, err := sntrup4591761.Encapsulate(
+				prng, kx.Publics[j])
+			if err != nil {
+				return nil, err
+			}
+			kx.SharedKeys[i][j] = *sharedKey
+			ciphertexts[i][j] = ct
 		}
+	}
+	return ciphertexts, nil
+}
+
+// Decapsulate decrypts mcount * len(ciphertexts)-1 shared keys from the broadcast
+// ciphertexts and XOR's each received key with the previously-generated shared
+// key corresponding with the message pair.
+func (kx *PQKX) Decapsulate(ciphertexts [][]*PQCiphertext, start int) error {
+	mcount := len(kx.Secrets)
+	mtot := len(ciphertexts)
+	for i := 0; i < mcount; i++ {
+		my := start + i
+
+		for j := 0; j < mtot; j++ {
+			if my == j {
+				continue
+			}
+
+			sharedKey, ok := sntrup4591761.Decapsulate(
+				ciphertexts[j][my], kx.Secrets[i])
+			if ok != 1 {
+				return fmt.Errorf("sntrup4591761: decapsulate failure")
+			}
+
+			// XOR the decapsulated shared key with the
+			// corresponding shared key we encapsulated for the peer
+			// and message position.
+			xor(&kx.SharedKeys[i][j], sharedKey)
+		}
+	}
+	return nil
+}
+
+func xor(dst, src *[32]byte) {
+	for i := 0; i < 32; i++ {
+		dst[i] ^= src[i]
 	}
 }
 
@@ -193,7 +257,7 @@ func (kx *PQKX) PQKeyExchange(prng io.Reader, kx *PQKX, start, mcount int) error
 type KX struct {
 	ECDHSecrets  []*x25519.KX
 	ECDHPublics  []*x25519.Public
-	PQSharedKeys []*[32]byte
+	PQSharedKeys [][][32]byte
 }
 
 // SharedKeys creates the SR and DC shared secret keys for mcount mixes, where
@@ -215,18 +279,13 @@ func SharedKeys(kx *KX, sid []byte, msize, run, start, mcount int) (sr [][][]byt
 			x25519Pub := kx.ECDHPublics[i]
 			sharedKey := kx.ECDHSecrets[i].SharedKey(x25519Pub)
 
-			pqct := kx.PQCiphertexts[i]
-			pqKey, ok := sntrup4591761.Decapsulate(pqct, kx.PQSecrets[i])
-			if ok != 1 {
-				// XXX
-				panic("decap failed")
-			}
-
-			// XOR x25519 and sntrup keys into a single shared key;
-			// thus if snprup is broken in the future, the security
-			// reduces to that of x25519.
-			for i := 0; i < 32; i++ {
-				sharedKey[i] ^= kx.PQSharedKeys[i]
+			// XOR x25519 and sntrup4591761 keys into a single
+			// shared key. If sntrup4591761 is discovered to be
+			// broken in the future, the security only reduces to
+			// that of x25519.
+			pqSharedKey := kx.PQSharedKeys[i][from]
+			for j := 0; j < 32; j++ {
+				sharedKey[j] ^= pqSharedKey[j]
 			}
 
 			h := blake256.New()
