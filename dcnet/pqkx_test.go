@@ -73,11 +73,6 @@ func TestPQKX(t *testing.T) {
 		t.Log(formatSharedKeys(peers[i].pqkx.SharedKeys))
 	}
 
-	t.Logf("%x\n", peers[0].pqkx.SharedKeys[0][1])
-	t.Logf("%x\n", peers[0].pqkx.SharedKeys[1][0])
-	t.Logf("%x\n", peers[1].pqkx.SharedKeys[0][1])
-	t.Logf("%x\n", peers[1].pqkx.SharedKeys[1][0])
-
 	// Ensure that every key pair has a unique shared key.
 	type seenBy struct {
 		m, k   int
