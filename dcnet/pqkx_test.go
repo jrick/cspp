@@ -109,7 +109,7 @@ func TestPQKX(t *testing.T) {
 				// (reverse m and k).
 				seen, ok := seenKeys[*key]
 				if ok {
-					if seen.m != k && seen.k != m {
+					if seen.m != k || seen.k != m {
 						t.Errorf("found same shared key in wrong pos")
 					}
 					*seen.paired = true
