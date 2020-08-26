@@ -16,12 +16,12 @@ func TestPQKX(t *testing.T) {
 
 	// 3 peers mixing 2 messages each
 	const mcount = 2
-	const mtot = 4
+	const mtot = 6
 	type peer struct {
 		pqkx        *PQKX
 		ciphertexts [][]*PQCiphertext
 	}
-	peers := make([]peer, 2)
+	peers := make([]peer, 3)
 
 	// Generate public/secret keys
 	publics := make([]*PQPublicKey, 0, mtot)
