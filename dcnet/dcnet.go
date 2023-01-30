@@ -75,13 +75,16 @@ func AddVectors(vs ...[]*big.Int) []*big.Int {
 }
 
 // Coefficients calculates a{0}..a{n} for the polynomial:
-//   g(x) = a{0} + a{1}x + a{2}x**2 + ... + a{n-1}x**(n-1) + a{n}x**n  (mod F)
+//
+//	g(x) = a{0} + a{1}x + a{2}x**2 + ... + a{n-1}x**(n-1) + a{n}x**n  (mod F)
+//
 // where
-//   a{n}   = -1
-//   a{n-1} = -(1/1) *    a{n}*S{0}
-//   a{n-2} = -(1/2) * (a{n-1}*S{0} +   a{n}*S{1})
-//   a{n-3} = -(1/3) * (a{n-2}*S{0} + a{n-1}*S{1} + a{n}*S{2})
-//   ...
+//
+//	a{n}   = -1
+//	a{n-1} = -(1/1) *    a{n}*S{0}
+//	a{n-2} = -(1/2) * (a{n-1}*S{0} +   a{n}*S{1})
+//	a{n-3} = -(1/3) * (a{n-2}*S{0} + a{n-1}*S{1} + a{n}*S{2})
+//	...
 //
 // The roots of this polynomial are the set of recovered messages.
 //
@@ -167,18 +170,19 @@ func (v *Vec) String() string {
 
 // Aliases for sntrup4591761 types
 type (
-	PQSecretKey  = [sntrup4591761.PrivateKeySize]byte
-	PQPublicKey  = [sntrup4591761.PublicKeySize]byte
-	PQCiphertext = [sntrup4591761.CiphertextSize]byte
+	PQSecretKey  = [1600]byte
+	PQPublicKey  = [1218]byte
+	PQCiphertext = [1047]byte
+	PQSharedKey  = [32]byte
 )
 
 // KX contains the client public and secret keys to perform shared key exchange
 // with other peers.
 type KX struct {
 	X25519       *x25519.KX
-	PQPublic     *[sntrup4591761.PublicKeySize]byte
-	PQSecret     *[sntrup4591761.PrivateKeySize]byte
-	PQCleartexts []*[sntrup4591761.SharedKeySize]byte
+	PQPublic     *PQPublicKey
+	PQSecret     *PQSecretKey
+	PQCleartexts []*PQSharedKey
 }
 
 // NewKX generates X25519 and Sntrup4591761 public and secret keys from a PRNG.
@@ -205,7 +209,7 @@ func NewKX(prng io.Reader) (*KX, error) {
 // Encapsulation in the DC-net requires randomness from a CSPRNG seeded by a
 // committed secret; blame assignment is not possible otherwise.
 func (kx *KX) Encapsulate(prng io.Reader, pubkeys []*PQPublicKey, my int) ([]*PQCiphertext, error) {
-	cts := make([]*[sntrup4591761.CiphertextSize]byte, len(pubkeys))
+	cts := make([]*PQCiphertext, len(pubkeys))
 	kx.PQCleartexts = make([]*[32]byte, len(pubkeys))
 
 	for i, pk := range pubkeys {
@@ -223,7 +227,8 @@ func (kx *KX) Encapsulate(prng io.Reader, pubkeys []*PQPublicKey, my int) ([]*PQ
 // SharedKeys creates the pairwise SR and DC shared secret keys for
 // mcounts[myvk] mixes.  ecdhPubs, cts, and mcounts must all share the same
 // slice length.
-func SharedKeys(kx *KX, ecdhPubs []*x25519.Public, cts []*PQCiphertext, sid []byte, msize, run, myvk int, mcounts []int) (sr [][][]byte, dc [][]*Vec, err error) {
+func SharedKeys(kx *KX, ecdhPubs []*x25519.Public, cts []*PQCiphertext, sid []byte, msize, run, myvk int, mcounts []int,
+) (sr [][][]byte, dc [][]*Vec, err error) {
 	if len(ecdhPubs) != len(mcounts) {
 		panic("number of x25519 public keys must match total number of peers")
 	}

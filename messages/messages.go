@@ -1,43 +1,43 @@
 // Package messages implements the message types communicated between client and
 // server.  The messaging in a successful run is sequenced as follows:
 //
-//   Client | Server
-//      PR -->       Pair Request
-//                   (wait for epoch)
-//         <-- BR    Begin Run
-//      KE -->       Key Exchange
-//         <-- KEs   Server broadcasts all KE messages to all peers
-//      CT -->       Post-Quantum ciphertext exchange
-//         <-- CTs   Server broadcasts ciphertexts created by others for us
-//      SR -->       Slot Reserve
-//         <-- RM    Recovered Messages
-//      DC -->       DC-net broadcast
-//         <-- CM    Confirm Messages (unsigned)
-//      CM -->       Confirm Messages (signed)
-//                   (server joins all signatures)
-//         <-- CM    Confirm Messages (with all signatures)
+//	Client | Server
+//	   PR -->       Pair Request
+//	                (wait for epoch)
+//	      <-- BR    Begin Run
+//	   KE -->       Key Exchange
+//	      <-- KEs   Server broadcasts all KE messages to all peers
+//	   CT -->       Post-Quantum ciphertext exchange
+//	      <-- CTs   Server broadcasts ciphertexts created by others for us
+//	   SR -->       Slot Reserve
+//	      <-- RM    Recovered Messages
+//	   DC -->       DC-net broadcast
+//	      <-- CM    Confirm Messages (unsigned)
+//	   CM -->       Confirm Messages (signed)
+//	                (server joins all signatures)
+//	      <-- CM    Confirm Messages (with all signatures)
 //
 // If a peer fails to find their message after either the exponential slot
 // reservation or XOR DC-net, the DC or CM message indicates to the server that
 // blame must be assigned to remove malicious peers from the mix.  This process
 // requires secrets committed to by the KE to be revealed.
 //
-//   Client | Server
-//      PR -->       Pair Request
-//                   (wait for epoch)
-//         <-- BR    Begin Run
-//      KE -->       Key Exchange
-//         <-- KEs   Server broadcasts all KE messages to all peers
-//      CT -->       Post-Quantum ciphertext exchange
-//         <-- CTs   Server broadcasts ciphertexts created by others for us
-//      SR -->       Slot Reserve
-//         <-- RM    Recovered Messages
-//      DC -->       DC-net broadcast (with RevealSecrets=true)
-//         <-- CM    Confirm Messages (with RevealSecrets=true)
-//      RS -->       Reveal Secrets
-//                   (server discovers misbehaving peers)
-//         <-- BR    Begin Run (with removed peers)
-//         ...
+//	Client | Server
+//	   PR -->       Pair Request
+//	                (wait for epoch)
+//	      <-- BR    Begin Run
+//	   KE -->       Key Exchange
+//	      <-- KEs   Server broadcasts all KE messages to all peers
+//	   CT -->       Post-Quantum ciphertext exchange
+//	      <-- CTs   Server broadcasts ciphertexts created by others for us
+//	   SR -->       Slot Reserve
+//	      <-- RM    Recovered Messages
+//	   DC -->       DC-net broadcast (with RevealSecrets=true)
+//	      <-- CM    Confirm Messages (with RevealSecrets=true)
+//	   RS -->       Reveal Secrets
+//	                (server discovers misbehaving peers)
+//	      <-- BR    Begin Run (with removed peers)
+//	      ...
 //
 // At any point, if the server times out receiving a client message, the
 // following message contains a nonzero BR field, and a new run is performed,
@@ -45,6 +45,7 @@
 package messages
 
 import (
+	"crypto/ed25519"
 	"encoding"
 	"encoding/binary"
 	"io"
@@ -53,9 +54,7 @@ import (
 
 	"decred.org/cspp/v2/dcnet"
 	"decred.org/cspp/v2/x25519"
-	"github.com/companyzero/sntrup4591761"
 	"github.com/decred/dcrd/crypto/blake256"
-	"golang.org/x/crypto/ed25519"
 )
 
 // ServerError describes an error message sent by the server.
@@ -97,7 +96,12 @@ var (
 	msgCommit  = []byte("COMMIT")
 )
 
-func putInt(scratch []byte, v int) []byte {
+type integer interface {
+	~int | ~int8 | ~int16 | ~int32 | ~int64 |
+		~uint | ~uint8 | ~uint16 | ~uint32 | ~uint64
+}
+
+func putInt[I integer](scratch []byte, v I) []byte {
 	binary.BigEndian.PutUint64(scratch, uint64(v))
 	return scratch
 }
@@ -149,10 +153,10 @@ type Signed interface {
 
 // Session describes a current mixing session and run.
 type Session struct {
-	sid     []byte
+	//sid     []byte
 	sk      ed25519.PrivateKey
 	vk      []ed25519.PublicKey
-	run     int
+	run     uint32
 	sidH    []byte
 	sidHPre []byte
 }
@@ -161,7 +165,7 @@ type Session struct {
 // ed25519 pubkeys ordered by peer index.
 // If sk is non-nil, signed message types created using this session will contain
 // a valid signature.
-func NewSession(sid []byte, run int, sk ed25519.PrivateKey, vk []ed25519.PublicKey) *Session {
+func NewSession(sid []byte, run uint32, sk ed25519.PrivateKey, vk []ed25519.PublicKey) *Session {
 	runBytes := putInt(make([]byte, 8), run)
 
 	h := blake256.New()
@@ -236,6 +240,44 @@ func (pr *PR) VerifySignature(pub ed25519.PublicKey) bool {
 	return verify(pub, pr, pr.Signature)
 }
 
+/*
+func () BtcDecode(r io.Reader, pver uint32) error {
+}
+func () BtcEncode(w io.Writer, pver uint32) error {
+}
+func () Command() string {
+}
+func () MaxPayloadLength(pver uint32) error {
+}
+*/
+
+func (pr *PR) BtcDecode(r io.Reader, pver uint32) error {
+	return nil
+}
+func (pr *PR) BtcEncode(w io.Writer, pver uint32) error {
+	return nil
+}
+func (pr *PR) Command() string {
+	return nil
+}
+func (pr *PR) MaxPayloadLength(pver uint32) error {
+	return nil
+}
+
+func (ke *KE) BtcDecode(r io.Reader, pver uint32) error {
+	return nil
+}
+func (ke *KE) BtcEncode(w io.Writer, pver uint32) error {
+	return nil
+}
+func (ke *KE) Command() string {
+	return nil
+}
+func (ke *KE) MaxPayloadLength(pver uint32) error {
+	return nil
+}
+
+/*
 // BR is the begin run message.
 // It is sent to all remaining valid peers when a new run begins.
 type BR struct {
@@ -260,13 +302,19 @@ func (br *BR) ServerError() error {
 	}
 	return br.Err
 }
+*/
 
-type Sntrup4591761PublicKey = [sntrup4591761.PublicKeySize]byte
-type Sntrup4591761Ciphertext = [sntrup4591761.CiphertextSize]byte
+type Sntrup4591761PublicKey = [1218]byte
+type Sntrup4591761Ciphertext = [1047]byte
 
 // KE is the client's opening key exchange message of a run.
+// It indicates all of the PR messages that have been observed for remaining
+// peers of a compatible mix, and key material to create shared keys with all
+// other peers.
 type KE struct {
-	Run        int // 0, 1, ...
+	Identity   ed25519.PublicKey
+	Run        uint32   // 0, 1, ...
+	SeenPRs    [][]byte // Validated signatures of PR messages
 	ECDH       *x25519.Public
 	PQPK       *Sntrup4591761PublicKey
 	Commitment []byte // Hash of RS (reveal secrets) message contents
@@ -276,7 +324,11 @@ type KE struct {
 func (ke *KE) writeSigned(w io.Writer) {
 	scratch := make([]byte, 8)
 	w.Write(msgKE)
+	writeSignedByteSlice(w, scratch, ke.Identity)
 	w.Write(putInt(scratch, ke.Run))
+	writeSlice(w, scratch, len(ke.SeenPRs), func(i int) {
+		writeSignedByteSlice(w, scratch, ke.SeenPRs[i])
+	})
 	writeSignedByteSlice(w, scratch, ke.ECDH[:])
 	writeSignedByteSlice(w, scratch, ke.PQPK[:])
 	writeSignedByteSlice(w, scratch, ke.Commitment)
@@ -284,6 +336,14 @@ func (ke *KE) writeSigned(w io.Writer) {
 
 func (ke *KE) VerifySignature(pub ed25519.PublicKey) bool {
 	return verify(pub, ke, ke.Signature)
+}
+
+func (ke *KE) Sid() []byte {
+	h := blake256.New()
+	for i := range ke.SeenPRs {
+		h.Write(ke.SeenPRs[i])
+	}
+	return h.Sum(nil)
 }
 
 // KeyExchange creates a signed key exchange message to verifiably provide the
@@ -302,15 +362,6 @@ func KeyExchange(kx *dcnet.KX, commitment []byte, ses *Session) *KE {
 // KEs is the server's broadcast of all received key exchange messages.
 type KEs struct {
 	KEs []*KE
-	BR  // Indicates to begin new run after peer exclusion
-	Err ServerError
-}
-
-func (kes *KEs) ServerError() error {
-	if kes.Err == 0 {
-		return nil
-	}
-	return kes.Err
 }
 
 // CT is the client's exchange of post-quantum shared key ciphertexts with all
@@ -350,20 +401,11 @@ func Ciphertexts(ciphertexts []*Sntrup4591761Ciphertext, ses *Session) *CT {
 // by all other peers for our client.
 type CTs struct {
 	Ciphertexts []*Sntrup4591761Ciphertext
-	BR          // Indicates to begin a new run after peer exclusion
-	Err         ServerError
-}
-
-func (cts *CTs) ServerError() error {
-	if cts.Err == 0 {
-		return nil
-	}
-	return cts.Err
 }
 
 // SR is the slot reservation broadcast.
 type SR struct {
-	Run       int
+	Run       uint32
 	DCMix     [][]*big.Int
 	Signature []byte
 }
@@ -399,18 +441,9 @@ func SlotReserve(dcmix [][]*big.Int, s *Session) *SR {
 // RM is the recovered messages result of collecting all SR messages and solving for
 // the mixed original messages.
 type RM struct {
-	Run           int
+	Run           uint32
 	Roots         []*big.Int
 	RevealSecrets bool
-	BR            // Indicates to begin new run after peer exclusion
-	Err           ServerError
-}
-
-func (rm *RM) ServerError() error {
-	if rm.Err == 0 {
-		return nil
-	}
-	return rm.Err
 }
 
 // RecoveredMessages creates a recovered messages message.
@@ -423,7 +456,7 @@ func RecoveredMessages(roots []*big.Int, s *Session) *RM {
 
 // DC is the DC-net broadcast.
 type DC struct {
-	Run           int
+	Run           uint32
 	DCNet         []*dcnet.Vec
 	RevealSecrets bool
 	Signature     []byte
@@ -465,8 +498,6 @@ func DCNet(dcs []*dcnet.Vec, s *Session) *DC {
 type CM struct {
 	Mix           BinaryRepresentable
 	RevealSecrets bool
-	BR            // Indicates to begin new run after peer exclusion
-	Err           ServerError
 	Signature     []byte
 }
 
@@ -484,13 +515,6 @@ func (cm *CM) writeSigned(w io.Writer) {
 
 func (cm *CM) VerifySignature(pub ed25519.PublicKey) bool {
 	return verify(pub, cm, cm.Signature)
-}
-
-func (cm *CM) ServerError() error {
-	if cm.Err == 0 {
-		return nil
-	}
-	return cm.Err
 }
 
 // ConfirmedMix creates the confirmed mix message, sending either the confirmed
